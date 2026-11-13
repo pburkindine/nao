@@ -11,7 +11,7 @@ import { isOidcConfigured } from './oidc-auth.service';
 const STARTUP_PING_TIMEOUT_MS = 3_000;
 
 export async function pingLicensesServer(): Promise<void> {
-	if (env.MODE !== 'prod') {
+	if (env.MODE !== 'prod' || env.NAO_DISABLE_STARTUP_PING) {
 		return;
 	}
 	const license = await getLicense();

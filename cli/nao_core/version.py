@@ -1,6 +1,7 @@
 """Check for newer nao-core versions on PyPI."""
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -29,6 +30,8 @@ def get_latest_version() -> str | None:
 
 def check_for_updates() -> None:
     """Non-blocking version check. Shows a warning only on cache hit; refreshes cache in background."""
+    if os.environ.get("NAO_DISABLE_UPDATE_CHECK", "false").lower() == "true":
+        return
     try:
         cached = _read_cache()
         if cached is not None:

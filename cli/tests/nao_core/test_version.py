@@ -46,6 +46,18 @@ def test_check_for_updates_spawns_detached_cache_refresh():
     mock_popen.return_value.communicate.assert_not_called()
 
 
+def test_check_for_updates_does_nothing_when_disabled(monkeypatch):
+    monkeypatch.setenv("NAO_DISABLE_UPDATE_CHECK", "true")
+    with (
+        patch("nao_core.version._read_cache") as mock_read,
+        patch("nao_core.version.subprocess.Popen") as mock_popen,
+    ):
+        check_for_updates()
+
+    mock_read.assert_not_called()
+    mock_popen.assert_not_called()
+
+
 def _check_for_updates_with_cache(cached_version: str | None) -> tuple[MagicMock, MagicMock]:
     with (
         patch("nao_core.version._read_cache", return_value=cached_version),

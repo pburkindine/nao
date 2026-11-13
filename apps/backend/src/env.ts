@@ -432,6 +432,11 @@ const baseRawEnvSchema = z.object({
 		.enum(['true', 'false'])
 		.optional()
 		.transform((val) => val === 'true'),
+	/** `true` skips the startup ping to the nao licence server, for deployments with no outbound internet access. */
+	NAO_DISABLE_STARTUP_PING: z
+		.enum(['true', 'false'])
+		.optional()
+		.transform((val) => val === 'true'),
 
 	/**
 	 * Comma-separated providers to keep out of the deployment entirely, regardless of where their

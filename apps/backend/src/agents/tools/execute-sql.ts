@@ -12,7 +12,8 @@ import {
 import { resolveExcludedColumnEnforcement } from '../../services/excluded-columns.service';
 import { runQueryOnLocalFiles } from '../../services/local-query.service';
 import { isWarehouseSqlEnabled, type SemanticQuery } from '../../services/semantic-layer.service';
-import { executeWarehouseSql } from '../../services/warehouse-sql.service';
+import { runPostExecuteHook, runPreExecuteHook, type SqlHookContext } from '../../services/sql-execution-hooks.service';
+import { executeWarehouseSql, type WarehouseSqlResult } from '../../services/warehouse-sql.service';
 import { ToolContext } from '../../types/tools';
 import { containsBlockedPassthroughCall, detectQueryRowLimit, isReadOnlySqlQuery } from '../../utils/sql-filter';
 import { createTool } from '../../utils/tools';
@@ -42,18 +43,7 @@ export async function executeQuery(
 	if (templateWarnings.length > 0 && sqlIncludesFilterTemplate(effectiveSql)) {
 		throw new Error(`Invalid story filter SQL template: ${templateWarnings.join(' ')}`);
 	}
-	if (containsBlockedPassthroughCall(effectiveSql)) {
-		throw new Error(
-			'Query calls a catalog/server-passthrough function (e.g. postgres_query, mysql_query, sqlite_query) — ' +
-				"blocked regardless of write permissions, since these open a connection to another server rather than write to this database's data.",
-		);
-	}
-	const writePermEnabled = context.agentSettings?.sql?.dangerouslyWritePermEnabled ?? false;
-	if (!writePermEnabled && !(await isReadOnlySqlQuery(effectiveSql))) {
-		throw new Error(
-			'Write SQL operations are disabled. Only SELECT queries are allowed. Enable "Dangerous write permissions" in the admin panel to allow INSERT, UPDATE, DELETE and DDL queries.',
-		);
-	}
+	await assertRunnableSql(effectiveSql, context);
 
 	if (save_to && context.adminMode) {
 		throw new Error('save_to is unavailable in admin mode. Run the query without save_to.');
@@ -79,27 +69,30 @@ export async function executeQuery(
 		);
 	}
 
-	const enforceExcludedColumns = await resolveExcludedColumnEnforcement(context.projectId, context.agentSettings);
-	const data = await executeWarehouseSql(effectiveSql, {
-		projectFolder: context.projectFolder,
-		databaseId: database_id,
-		envVars: context.envVars,
-		azureAccessToken: context.azureAccessToken,
-		enforceExcludedColumns,
-		tableAccess: context.warehouseTableAccess,
-		rowSecurity: context.warehouseRowSecurity ?? { enforced: false },
-	});
 	const id = query_id ?? (`query_${crypto.randomUUID().slice(0, 8)}` as const);
+	const hookContext: SqlHookContext = {
+		queryId: id,
+		databaseId: database_id,
+		projectId: context.projectId,
+		userId: context.userId,
+		chatId: context.chatId,
+	};
+	const sqlToRun = await runPreExecuteHook(effectiveSql, hookContext);
+	const isRewritten = sqlToRun !== effectiveSql;
+	if (isRewritten) {
+		await assertRunnableSql(sqlToRun, context);
+	}
+	const data = await executeWarehouseQuery(sqlToRun, context, hookContext);
 
 	context.queryResults.set(id, {
 		columns: data.columns,
 		data: data.data,
-		sqlQuery: sql_query,
+		sqlQuery: isRewritten ? sqlToRun : sql_query,
 		...(database_id && { databaseId: database_id }),
 		...(options.semanticQuery && { semanticQuery: options.semanticQuery }),
 	});
 
-	const appliedLimit = detectQueryRowLimit(effectiveSql);
+	const appliedLimit = detectQueryRowLimit(sqlToRun);
 
 	return withTemplateWarnings(
 		{
@@ -110,6 +103,43 @@ export async function executeQuery(
 		},
 		templateWarnings,
 	);
+}
+
+async function executeWarehouseQuery(
+	sql: string,
+	context: ToolContext,
+	hookContext: SqlHookContext,
+): Promise<WarehouseSqlResult> {
+	const enforceExcludedColumns = await resolveExcludedColumnEnforcement(context.projectId, context.agentSettings);
+	const startedAt = performance.now();
+	let result: WarehouseSqlResult;
+	try {
+		result = await executeWarehouseSql(sql, {
+			projectFolder: context.projectFolder,
+			databaseId: hookContext.databaseId,
+			envVars: context.envVars,
+			azureAccessToken: context.azureAccessToken,
+			enforceExcludedColumns,
+			tableAccess: context.warehouseTableAccess,
+			rowSecurity: context.warehouseRowSecurity ?? { enforced: false },
+		});
+	} catch (error) {
+		await runPostExecuteHook(sql, hookContext, {
+			rowCount: null,
+			columns: null,
+			durationMs: Math.round(performance.now() - startedAt),
+			error: error instanceof Error ? error.message : String(error),
+		});
+		throw error;
+	}
+
+	const replacement = await runPostExecuteHook(sql, hookContext, {
+		rowCount: result.row_count,
+		columns: result.columns,
+		durationMs: Math.round(performance.now() - startedAt),
+		error: null,
+	});
+	return replacement ? { ...result, ...replacement, row_count: replacement.data.length } : result;
 }
 
 /** Files and earlier results, in nao's own DuckDB. No warehouse is involved. */
@@ -217,6 +247,21 @@ function semanticQueryNotEditableError(queryId: string): Error {
 }
 
 /** Semantics-only mode: the warehouse is reached through the layer, raw SQL stays for the local database. */
+async function assertRunnableSql(sql: string, context: ToolContext): Promise<void> {
+	if (containsBlockedPassthroughCall(sql)) {
+		throw new Error(
+			'Query calls a catalog/server-passthrough function (e.g. postgres_query, mysql_query, sqlite_query) — ' +
+				"blocked regardless of write permissions, since these open a connection to another server rather than write to this database's data.",
+		);
+	}
+	const writePermEnabled = context.agentSettings?.sql?.dangerouslyWritePermEnabled ?? false;
+	if (!writePermEnabled && !(await isReadOnlySqlQuery(sql))) {
+		throw new Error(
+			'Write SQL operations are disabled. Only SELECT queries are allowed. Enable "Dangerous write permissions" in the admin panel to allow INSERT, UPDATE, DELETE and DDL queries.',
+		);
+	}
+}
+
 function assertWarehouseSqlAllowed(databaseId: string | undefined, context: ToolContext): void {
 	if (context.adminMode || isWarehouseSqlEnabled(context.semanticLayerMode) || databaseId === LOCAL_DATABASE_ID) {
 		return;

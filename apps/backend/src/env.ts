@@ -256,6 +256,19 @@ const baseRawEnvSchema = z.object({
 		.transform((val) => val?.trim() || undefined),
 	SLACK_TRANSPORT_MODE: z.enum(['webhook', 'socket']).optional(),
 
+	/** Optional policy endpoint POSTed each warehouse query before it runs; it allows, denies or rewrites it. Fails closed. */
+	NAO_SQL_PRE_EXECUTE_URL: z
+		.string()
+		.optional()
+		.transform((val) => val?.trim() || undefined)
+		.pipe(z.url({ message: 'NAO_SQL_PRE_EXECUTE_URL must be a valid URL' }).optional()),
+	/** Optional endpoint POSTed each warehouse query's outcome, for audit; it may return a redacted result. */
+	NAO_SQL_POST_EXECUTE_URL: z
+		.string()
+		.optional()
+		.transform((val) => val?.trim() || undefined)
+		.pipe(z.url({ message: 'NAO_SQL_POST_EXECUTE_URL must be a valid URL' }).optional()),
+	NAO_SQL_HOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
 	FASTAPI_PORT: z.coerce.number().default(8005),
 	/** On SIGTERM, how long /api/health reports unhealthy while still serving, so a load balancer can move traffic away. */
 	SHUTDOWN_DRAIN_DELAY_MS: z.coerce.number().int().nonnegative().default(0),

@@ -1,5 +1,6 @@
 import { type SortDirection, sortTableRows } from '@nao/shared/story-table-utils';
 
+import { getQueryResultByQueryId } from '../queries/chat.queries';
 import { getQueryToolOutputInChat } from '../queries/execute-sql.queries';
 import type { QueryResult } from '../types/tools';
 import { agentService } from './agent';
@@ -22,10 +23,24 @@ export interface QueryRowsPage {
 
 export async function getQueryRowsPage(request: QueryRowsRequest): Promise<QueryRowsPage | null> {
 	const result = await findQueryResult(request.chatId, request.toolCallId, request.queryId);
-	if (!result) {
-		return null;
-	}
+	return result ? pageOf(result, request) : null;
+}
 
+/** For callers that only know the query id, such as an MCP client given `queries[].id` by `ask_nao`. */
+export async function getQueryRowsPageByQueryId(
+	request: Omit<QueryRowsRequest, 'toolCallId'>,
+): Promise<QueryRowsPage | null> {
+	const result =
+		(await getQueryResultByQueryId(request.chatId, request.queryId)) ??
+		agentService.get(request.chatId)?.getQueryResult(request.queryId) ??
+		null;
+	return result ? pageOf(result, request) : null;
+}
+
+function pageOf(
+	result: QueryResult,
+	request: Omit<QueryRowsRequest, 'chatId' | 'toolCallId' | 'queryId'>,
+): QueryRowsPage {
 	const rows = request.sort ? sortTableRows(result.data, request.sort.column, request.sort.direction) : result.data;
 	const end = request.limit === undefined ? undefined : request.offset + request.limit;
 	return { columns: result.columns, rows: rows.slice(request.offset, end), totalRows: rows.length };

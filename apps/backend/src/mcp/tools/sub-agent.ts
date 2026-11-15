@@ -9,6 +9,7 @@ import * as chatQueries from '../../queries/chat.queries';
 import * as storyQueries from '../../queries/story.queries';
 import { agentService } from '../../services/agent';
 import { mcpService } from '../../services/mcp';
+import { getQueryRowsPageByQueryId } from '../../services/query-rows.service';
 import { skillService } from '../../services/skill';
 import type { UIMessage, UIMessagePart } from '../../types/chat';
 import {
@@ -23,7 +24,7 @@ import { CHART_DATA_MODE_ASK_NAO_ADDENDUM, CHART_DATA_MODE_RESULT_NUDGE } from '
 import type { McpContext, ToolResult } from '../logging';
 import { chatUrl, storyUrl } from '../urls';
 import { type AskNaoClarification, type AskNaoResult, askNaoRuns, type AskNaoStory } from './ask-nao-runs';
-import { registerMcpTool } from './register-mcp-tool';
+import { jsonToolResult, registerMcpTool } from './register-mcp-tool';
 
 type Agent = Awaited<ReturnType<typeof agentService.create>>;
 
@@ -80,10 +81,21 @@ const GET_NAO_ANSWER_DESCRIPTION =
 	'Pass the `chatId` it returned. Poll every few seconds until `status` is `complete` ' +
 	'(the response then carries the final `text`, `queries`, `stories` — with the link to share for each — and `story_ids`) or `error`.';
 
+const GET_QUERY_ROWS_DESCRIPTION =
+	'Download the full result of a query an `ask_nao` run executed, one page at a time. ' +
+	'USE WHEN: you need more rows than the `preview` in `queries`, for an export or a file. ' +
+	'Pass the `chatId` and a `queries[].id` from `ask_nao` or `get_nao_answer`, starting at `offset` 0, ' +
+	'and call again with `next_offset` until it is null.';
+
+/** Same cap as the web app's `chat.getQueryRows`. */
+const MAX_QUERY_ROWS_PAGE_SIZE = 1000;
+
 const ASK_NAO_QUERIES_SCHEMA = z
 	.array(
 		z.object({
-			id: z.string().describe('`query_id` to pass to `display_chart`.'),
+			id: z
+				.string()
+				.describe('`query_id` to pass to `display_chart`, or to `get_query_rows` with `chatId` for every row.'),
 			columns: z
 				.array(z.string())
 				.describe('Column names in the result — use these for `x_axis_key` and `series[].data_key`.'),
@@ -240,6 +252,45 @@ export async function registerSubAgentTools(server: McpServer, ctx: McpContext):
 		handler: async ({ chatId }) => {
 			await assertChatAccess(ctx, chatId);
 			return resolveAnswerPayload(chatId, ctx);
+		},
+	});
+
+	registerMcpTool(server, ctx, {
+		name: 'get_query_rows',
+		title: 'Get Query Rows',
+		description: GET_QUERY_ROWS_DESCRIPTION,
+		inputSchema: {
+			chatId: z.uuid().describe('UUID of the chat the query ran in, as returned by `ask_nao`.'),
+			query_id: z.string().describe('`queries[].id` from `ask_nao` or `get_nao_answer`.'),
+			offset: z.number().int().min(0).default(0).describe('Index of the first row to return.'),
+			limit: z
+				.number()
+				.int()
+				.positive()
+				.max(MAX_QUERY_ROWS_PAGE_SIZE)
+				.default(MAX_QUERY_ROWS_PAGE_SIZE)
+				.describe(`Rows per page, at most ${MAX_QUERY_ROWS_PAGE_SIZE}.`),
+		},
+		outputSchema: {
+			columns: z.array(z.string()),
+			rows: z.array(z.record(z.string(), z.unknown())),
+			total_rows: z.number().describe('Rows in the whole result.'),
+			next_offset: z.number().nullable().describe('`offset` for the next page; null on the last one.'),
+		},
+		errorMessage: () => 'Failed to fetch the query rows. Check that `query_id` ran in the chat `chatId`.',
+		handler: async ({ chatId, query_id, offset, limit }) => {
+			await assertChatAccess(ctx, chatId);
+			const page = await getQueryRowsPageByQueryId({ chatId, queryId: query_id, offset, limit });
+			if (!page) {
+				throw new Error(`Query ${query_id} not found in this chat.`);
+			}
+			const end = offset + page.rows.length;
+			return jsonToolResult({
+				columns: page.columns,
+				rows: page.rows,
+				total_rows: page.totalRows,
+				next_offset: end < page.totalRows ? end : null,
+			});
 		},
 	});
 }

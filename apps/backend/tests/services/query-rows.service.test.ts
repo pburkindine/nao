@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { getQueryResultByQueryId } from '../../src/queries/chat.queries';
 import { getQueryToolOutputInChat } from '../../src/queries/execute-sql.queries';
 import { agentService } from '../../src/services/agent';
-import { getQueryRowsPage } from '../../src/services/query-rows.service';
+import { getQueryRowsPage, getQueryRowsPageByQueryId } from '../../src/services/query-rows.service';
 
+vi.mock('../../src/queries/chat.queries', () => ({ getQueryResultByQueryId: vi.fn() }));
 vi.mock('../../src/queries/execute-sql.queries', () => ({ getQueryToolOutputInChat: vi.fn() }));
 vi.mock('../../src/services/agent', () => ({ agentService: { get: vi.fn() } }));
 
@@ -64,6 +66,42 @@ describe('getQueryRowsPage', () => {
 		vi.mocked(agentService.get).mockReturnValue(undefined);
 
 		expect(await getQueryRowsPage(REQUEST)).toBeNull();
+	});
+});
+
+describe('getQueryRowsPageByQueryId', () => {
+	const BY_ID = { chatId: 'chat-1', queryId: 'query_abc', offset: 0 };
+
+	beforeEach(() => {
+		vi.mocked(getQueryResultByQueryId).mockReset();
+		vi.mocked(agentService.get).mockReset();
+	});
+
+	it('returns a page of the query persisted in the chat', async () => {
+		vi.mocked(getQueryResultByQueryId).mockResolvedValue({ columns: ['amount'], data: ROWS });
+
+		const page = await getQueryRowsPageByQueryId({ ...BY_ID, offset: 3, limit: 5 });
+
+		expect(page).toEqual({ columns: ['amount'], rows: [{ amount: 20 }, { amount: 40 }], totalRows: 5 });
+		expect(getQueryResultByQueryId).toHaveBeenCalledWith('chat-1', 'query_abc');
+	});
+
+	it('falls back to the running agent for a query of the current turn', async () => {
+		vi.mocked(getQueryResultByQueryId).mockResolvedValue(null);
+		const getQueryResult = vi.fn().mockReturnValue({ columns: ['amount'], data: ROWS });
+		vi.mocked(agentService.get).mockReturnValue({ getQueryResult } as never);
+
+		const page = await getQueryRowsPageByQueryId({ ...BY_ID, limit: 2 });
+
+		expect(getQueryResult).toHaveBeenCalledWith('query_abc');
+		expect(page?.rows).toEqual(ROWS.slice(0, 2));
+	});
+
+	it('returns null when the chat has no such query', async () => {
+		vi.mocked(getQueryResultByQueryId).mockResolvedValue(null);
+		vi.mocked(agentService.get).mockReturnValue(undefined);
+
+		expect(await getQueryRowsPageByQueryId(BY_ID)).toBeNull();
 	});
 });
 

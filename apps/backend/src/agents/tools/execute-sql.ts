@@ -79,8 +79,9 @@ export async function executeQuery(
 		);
 	}
 
+	const id = query_id ?? (`query_${crypto.randomUUID().slice(0, 8)}` as const);
 	const enforceExcludedColumns = await resolveExcludedColumnEnforcement(context.projectId, context.agentSettings);
-	const data = await executeWarehouseSql(effectiveSql, {
+	const { executedSql, ...data } = await executeWarehouseSql(effectiveSql, {
 		projectFolder: context.projectFolder,
 		databaseId: database_id,
 		envVars: context.envVars,
@@ -88,18 +89,19 @@ export async function executeQuery(
 		enforceExcludedColumns,
 		tableAccess: context.warehouseTableAccess,
 		rowSecurity: context.warehouseRowSecurity ?? { enforced: false },
+		policy: { userId: context.userId, projectId: context.projectId, chatId: context.chatId, origin: 'agent' },
+		queryId: id,
 	});
-	const id = query_id ?? (`query_${crypto.randomUUID().slice(0, 8)}` as const);
 
 	context.queryResults.set(id, {
 		columns: data.columns,
 		data: data.data,
-		sqlQuery: sql_query,
+		sqlQuery: executedSql === effectiveSql ? sql_query : executedSql,
 		...(database_id && { databaseId: database_id }),
 		...(options.semanticQuery && { semanticQuery: options.semanticQuery }),
 	});
 
-	const appliedLimit = detectQueryRowLimit(effectiveSql);
+	const appliedLimit = detectQueryRowLimit(executedSql);
 
 	return withTemplateWarnings(
 		{

@@ -18,8 +18,12 @@ vi.mock('../../src/agents/tools/query-app-db', () => ({
 vi.mock('../../src/services/local-query.service', () => ({
 	runQueryOnLocalFiles: vi.fn(),
 }));
+vi.mock('../../src/queries/user.queries', () => ({
+	getUser: vi.fn(async () => ({ id: 'user-1', email: 'ada@example.com' })),
+}));
 
 import executeSqlTool, { executeQuery } from '../../src/agents/tools/execute-sql';
+import { env } from '../../src/env';
 import { getExecuteSqlPartByQueryIdInChat, updateExecuteSqlPart } from '../../src/queries/execute-sql.queries';
 import { hasFeature, LICENSE_FEATURES } from '../../src/services/license.service';
 import type { WarehouseTableAccess } from '../../src/services/user-group-context-access.service';
@@ -171,6 +175,32 @@ describe('execute_sql blocks catalog/server-passthrough calls unconditionally', 
 		await expect(
 			executeQuery({ sql_query: exploitSql }, createToolContext({ agentSettings: agentSettings as never })),
 		).rejects.toThrow(/passthrough/);
+	});
+});
+
+describe('execute_sql under a SQL policy', () => {
+	afterEach(() => {
+		env.NAO_SQL_POLICY_URL = undefined;
+	});
+
+	it('records the SQL the policy rewrote as the query that ran', async () => {
+		env.NAO_SQL_POLICY_URL = 'https://pdp.test';
+		const fetch = vi.fn(async (url: string, _init: RequestInit) =>
+			url.endsWith('/access/v1/evaluation')
+				? Response.json({ decision: true, context: { sql: 'SELECT id FROM orders LIMIT 10' } })
+				: Response.json({ data: [{ id: 1 }], row_count: 1, columns: ['id'] }),
+		);
+		vi.stubGlobal('fetch', fetch);
+		const context = createToolContext();
+
+		const output = await executeQuery({ sql_query: 'SELECT id FROM orders' }, context);
+
+		expect(JSON.parse(String(fetch.mock.calls[0][1].body))).toMatchObject({
+			context: { origin: 'agent', query_id: output.id },
+		});
+		expect(context.queryResults.get(output.id)?.sqlQuery).toBe('SELECT id FROM orders LIMIT 10');
+		expect(output.applied_limit).toBe(10);
+		expect(output).not.toHaveProperty('executedSql');
 	});
 });
 

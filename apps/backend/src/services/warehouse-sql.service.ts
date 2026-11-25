@@ -1,7 +1,9 @@
 import type { WarehouseColumnSecurity, WarehouseRowSecurity } from '@nao/shared';
 
 import { env } from '../env';
+import type { PolicyContext, PolicyOutcome } from '../types/query-policy';
 import { assertWarehouseTableAccess, type WarehouseTableAccess } from './context-access';
+import { authorizeQuery, recordQuery } from './query-policy.service';
 import { type RunSqlQueryTag, serializeRunSqlQueryTag } from './sql-query-tag.service';
 
 interface WarehouseSqlOptions {
@@ -38,8 +40,37 @@ export class WarehouseSqlError extends Error {
 	}
 }
 
-export async function executeWarehouseSql(sql: string, options: WarehouseSqlOptions): Promise<WarehouseSqlResult> {
-	return requestWarehouseSql<WarehouseSqlResult>('/execute_sql', sql, options);
+interface WarehouseSqlExecutionOptions extends WarehouseSqlOptions {
+	/** Required, so no warehouse query can run without the user and origin the SQL policy decides for. */
+	policy: PolicyContext;
+	queryId?: string;
+}
+
+/** Runs a warehouse query past the deployment's SQL policy, then records how it went; `executedSql` is what ran. */
+export async function executeWarehouseSql(
+	sql: string,
+	options: WarehouseSqlExecutionOptions,
+): Promise<WarehouseSqlResult & { executedSql: string }> {
+	const query = { sql, databaseId: options.databaseId, queryId: options.queryId };
+	const executedSql = await authorizeQuery(query, options.policy);
+	const executedQuery = { ...query, sql: executedSql };
+	const startedAt = performance.now();
+	const elapsed = () => Math.round(performance.now() - startedAt);
+
+	let result: WarehouseSqlResult;
+	try {
+		result = await requestWarehouseSql<WarehouseSqlResult>('/execute_sql', executedSql, options);
+	} catch (error) {
+		await recordQuery(executedQuery, options.policy, failedOutcome(error, elapsed()));
+		throw error;
+	}
+	await recordQuery(executedQuery, options.policy, {
+		rowCount: result.row_count,
+		columns: result.columns,
+		durationMs: elapsed(),
+		error: null,
+	});
+	return { ...result, executedSql };
 }
 
 export async function validateWarehouseSql(sql: string, options: WarehouseSqlOptions): Promise<WarehouseSqlValidation> {
@@ -108,6 +139,15 @@ async function requestWarehouseSql<T>(
 	}
 
 	return response.json() as Promise<T>;
+}
+
+function failedOutcome(error: unknown, durationMs: number): PolicyOutcome {
+	return {
+		rowCount: null,
+		columns: null,
+		durationMs,
+		error: error instanceof Error ? error.message : String(error),
+	};
 }
 
 function serializeColumnSecurity(columnSecurity: WarehouseColumnSecurity) {

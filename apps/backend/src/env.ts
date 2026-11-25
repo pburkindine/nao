@@ -278,6 +278,24 @@ const baseRawEnvSchema = z.object({
 		.transform((val) => val?.trim() || undefined),
 	SLACK_TRANSPORT_MODE: z.enum(['webhook', 'socket']).optional(),
 
+	/** Base URL of an OpenID AuthZEN policy decision point asked before every warehouse query. */
+	NAO_SQL_POLICY_URL: z
+		.string()
+		.optional()
+		.transform((val) => val?.trim() || undefined)
+		.pipe(z.url({ message: 'NAO_SQL_POLICY_URL must be a valid URL' }).optional()),
+	/** Optional endpoint the policy decision point's deployment exposes for one audit record per warehouse query. */
+	NAO_SQL_POLICY_AUDIT_URL: z
+		.string()
+		.optional()
+		.transform((val) => val?.trim() || undefined)
+		.pipe(z.url({ message: 'NAO_SQL_POLICY_AUDIT_URL must be a valid URL' }).optional()),
+	NAO_SQL_POLICY_TOKEN: z
+		.string()
+		.optional()
+		.transform((val) => val?.trim() || undefined),
+	NAO_SQL_POLICY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+
 	FASTAPI_PORT: z.coerce.number().default(8005),
 	/** On SIGTERM, how long /api/health reports unhealthy while still serving, so a load balancer can move traffic away. */
 	SHUTDOWN_DRAIN_DELAY_MS: z.coerce.number().int().nonnegative().default(0),

@@ -966,10 +966,10 @@ async function executeBillingValidatedRawSql(
 	}
 
 	try {
-		const data = await executeWarehouseSql(
-			sqlQuery,
-			buildWarehouseSqlOptions(options.executionContext, options.databaseId),
-		);
+		const data = await executeWarehouseSql(sqlQuery, {
+			...buildWarehouseSqlOptions(options.executionContext, options.databaseId),
+			policy: { userId: context.userId, projectId: context.projectId, chatId: context.chatId, origin: 'story' },
+		});
 		return { data: data.data, columns: data.columns };
 	} catch (error) {
 		if (options.executionContext.isViewerScoped && error instanceof WarehouseSqlError && error.status === 403) {

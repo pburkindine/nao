@@ -96,6 +96,10 @@ vi.mock('../../src/queries/story-viewer-data-cache.queries', () => ({
 	upsertStoryViewerDataCache: mocks.upsertStoryViewerDataCache,
 }));
 
+vi.mock('../../src/queries/user.queries', () => ({
+	getUser: vi.fn(async () => ({ id: 'owner-1', email: 'owner@example.com' })),
+}));
+
 vi.mock('../../src/queries/shared-story.queries', () => ({
 	getQueryDataFromCode: mocks.getQueryDataFromCode,
 }));
@@ -160,6 +164,7 @@ vi.mock('../../src/queries/story-file.queries', () => ({
 	listVersionFiles: mocks.listVersionFiles,
 }));
 
+import { env } from '../../src/env';
 import { assertProjectCloudBillingAccess } from '../../src/services/cloud-billing-access.service';
 import {
 	createStoryExecutionContext,
@@ -654,6 +659,33 @@ describe('live story SQL execution', () => {
 			'Warehouse SQL request denied: Query blocked by Context table permissions.',
 		);
 		expect(mocks.upsertStoryDataCacheByStoryId).not.toHaveBeenCalled();
+	});
+
+	it('asks the SQL policy, as the story owner, before a live story query reaches the warehouse', async () => {
+		env.NAO_SQL_POLICY_URL = 'https://pdp.test';
+		mocks.getLatestVersionByStoryId.mockResolvedValue(storyVersion(WAREHOUSE_STORY_CODE));
+		mocks.getLatestSqlQueriesByIds.mockResolvedValue({
+			query_warehouse: { sqlQuery: 'SELECT * FROM orders', databaseId: 'analytics', adminMode: false },
+		});
+		const fetchMock = vi.fn(async (_url: string, _init: { body: string }) =>
+			Response.json({ decision: false, context: { reason: 'orders is outside your data boundary' } }),
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		try {
+			await expect(refreshStoryData('chat-1', 'orders')).rejects.toThrow(
+				'The query was refused by the SQL policy: orders is outside your data boundary',
+			);
+		} finally {
+			env.NAO_SQL_POLICY_URL = undefined;
+		}
+
+		expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['https://pdp.test/access/v1/evaluation']);
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+			subject: { id: 'owner-1', properties: { email: 'owner@example.com' } },
+			resource: { id: 'analytics', properties: { sql: 'SELECT * FROM orders' } },
+			context: { origin: 'story', chat_id: 'chat-1' },
+		});
 	});
 
 	it('refreshes a local query in DuckDB after re-running the warehouse query it reads from', async () => {

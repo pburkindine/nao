@@ -160,6 +160,7 @@ vi.mock('../../src/queries/story-file.queries', () => ({
 	listVersionFiles: mocks.listVersionFiles,
 }));
 
+import { env } from '../../src/env';
 import { assertProjectCloudBillingAccess } from '../../src/services/cloud-billing-access.service';
 import {
 	createStoryExecutionContext,
@@ -654,6 +655,35 @@ describe('live story SQL execution', () => {
 			'Warehouse SQL request denied: Query blocked by Context table permissions.',
 		);
 		expect(mocks.upsertStoryDataCacheByStoryId).not.toHaveBeenCalled();
+	});
+
+	it('sends a live story query, as the story owner, to the pre-execute hook before the warehouse', async () => {
+		env.NAO_SQL_PRE_EXECUTE_URL = 'http://policy.test/pre-execute';
+		mocks.getLatestVersionByStoryId.mockResolvedValue(storyVersion(WAREHOUSE_STORY_CODE));
+		mocks.getLatestSqlQueriesByIds.mockResolvedValue({
+			query_warehouse: { sqlQuery: 'SELECT * FROM orders', databaseId: 'analytics', adminMode: false },
+		});
+		const fetchMock = vi.fn(async (_url: string, _init: { body: string }) =>
+			Response.json({ decision: 'deny', reason: 'orders is outside your data boundary' }),
+		);
+		vi.stubGlobal('fetch', fetchMock);
+
+		try {
+			await expect(refreshStoryData('chat-1', 'orders')).rejects.toThrow(
+				'The query was refused by the SQL policy: orders is outside your data boundary',
+			);
+		} finally {
+			env.NAO_SQL_PRE_EXECUTE_URL = undefined;
+		}
+
+		expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['http://policy.test/pre-execute']);
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+			sql: 'SELECT * FROM orders',
+			database_id: 'analytics',
+			user_id: 'owner-1',
+			chat_id: 'chat-1',
+			origin: 'story',
+		});
 	});
 
 	it('refreshes a local query in DuckDB after re-running the warehouse query it reads from', async () => {

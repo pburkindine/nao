@@ -42,6 +42,7 @@ describe('executeWarehouseSql', () => {
 			columnSecurity: { enforced: false },
 			rowSecurity: { enforced: false },
 			queryTag,
+			hookContext: { userId: 'user-1', projectId: 'project-1', chatId: 'chat-1', origin: 'agent' },
 		});
 
 		const body = JSON.parse(String(fetchMock.mock.calls[0][1].body));

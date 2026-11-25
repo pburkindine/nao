@@ -2,6 +2,12 @@ import type { WarehouseColumnSecurity, WarehouseRowSecurity } from '@nao/shared'
 
 import { env } from '../env';
 import { assertWarehouseTableAccess, type WarehouseTableAccess } from './context-access';
+import {
+	runPostExecuteHook,
+	runPreExecuteHook,
+	type SqlHookContext,
+	type SqlHookOutcome,
+} from './sql-execution-hooks.service';
 import { type RunSqlQueryTag, serializeRunSqlQueryTag } from './sql-query-tag.service';
 
 interface WarehouseSqlOptions {
@@ -38,8 +44,41 @@ export class WarehouseSqlError extends Error {
 	}
 }
 
-export async function executeWarehouseSql(sql: string, options: WarehouseSqlOptions): Promise<WarehouseSqlResult> {
-	return requestWarehouseSql<WarehouseSqlResult>('/execute_sql', sql, options);
+interface WarehouseSqlExecutionOptions extends WarehouseSqlOptions {
+	/** Required, so no warehouse query can run without the user and origin the SQL hooks are told about. */
+	hookContext: SqlHookContext;
+	queryId?: string;
+}
+
+/** Runs a warehouse query past the deployment's SQL hooks; `executedSql` is what ran. */
+export async function executeWarehouseSql(
+	sql: string,
+	options: WarehouseSqlExecutionOptions,
+): Promise<WarehouseSqlResult & { executedSql: string }> {
+	const query = { sql, databaseId: options.databaseId, queryId: options.queryId };
+	const executedSql = await runPreExecuteHook(query, options.hookContext);
+	const executedQuery = { ...query, sql: executedSql };
+	const startedAt = performance.now();
+	const elapsed = () => Math.round(performance.now() - startedAt);
+
+	let result: WarehouseSqlResult;
+	try {
+		result = await requestWarehouseSql<WarehouseSqlResult>('/execute_sql', executedSql, options);
+	} catch (error) {
+		await runPostExecuteHook(executedQuery, options.hookContext, failedOutcome(error, elapsed()));
+		throw error;
+	}
+	const replacement = await runPostExecuteHook(executedQuery, options.hookContext, {
+		rowCount: result.row_count,
+		columns: result.columns,
+		durationMs: elapsed(),
+		error: null,
+	});
+	return {
+		...result,
+		...(replacement && { ...replacement, row_count: replacement.data.length }),
+		executedSql,
+	};
 }
 
 export async function validateWarehouseSql(sql: string, options: WarehouseSqlOptions): Promise<WarehouseSqlValidation> {
@@ -108,6 +147,15 @@ async function requestWarehouseSql<T>(
 	}
 
 	return response.json() as Promise<T>;
+}
+
+function failedOutcome(error: unknown, durationMs: number): SqlHookOutcome {
+	return {
+		rowCount: null,
+		columns: null,
+		durationMs,
+		error: error instanceof Error ? error.message : String(error),
+	};
 }
 
 function serializeColumnSecurity(columnSecurity: WarehouseColumnSecurity) {
